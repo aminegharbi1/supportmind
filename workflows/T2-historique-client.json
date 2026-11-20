@@ -1,0 +1,61 @@
+{
+  "name": "T2 — Historique du client",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "email"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "c937b968-39cd-47d8-ab18-2287b34f1d61",
+      "name": "Appel depuis l agent"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select t.id as ticket_id, t.sujet, t.statut, t.categorie, t.priorite, t.cree_le\nfrom tickets t\njoin customers c on c.id = t.customer_id\nwhere c.email = $1\norder by t.cree_le desc\nlimit 5;",
+        "options": {
+          "queryReplacement": "={{ [$json.email] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        220,
+        0
+      ],
+      "id": "44745899-8963-4870-bc3b-4043914c8af6",
+      "name": "Tickets précédents",
+      "credentials": {
+        "postgres": {
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Appel depuis l agent": {
+      "main": [
+        [
+          {
+            "node": "Tickets précédents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {}
+}
