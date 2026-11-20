@@ -1,0 +1,61 @@
+{
+  "name": "T1 — Rechercher dans la documentation",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "requete"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "9c95876d-fe3d-4280-ad54-a8987d4f6b87",
+      "name": "Appel depuis l agent"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select c.id as chunk_id, d.titre, d.version, c.texte,\n       round(ts_rank(c.recherche, websearch_to_tsquery('french', $1))::numeric, 4) as score\nfrom knowledge_chunks c\njoin knowledge_documents d on d.id = c.document_id\nwhere d.etat = 'publie'\n  and c.recherche @@ websearch_to_tsquery('french', $1)\norder by score desc\nlimit 3;",
+        "options": {
+          "queryReplacement": "={{ [$json.requete] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        220,
+        0
+      ],
+      "id": "dba81d36-bda7-49f8-9fdc-117a8459256f",
+      "name": "Recherche plein texte",
+      "credentials": {
+        "postgres": {
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Appel depuis l agent": {
+      "main": [
+        [
+          {
+            "node": "Recherche plein texte",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {}
+}
