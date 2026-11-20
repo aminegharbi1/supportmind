@@ -1,0 +1,64 @@
+{
+  "name": "T3 — Créer une escalade",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "ticket_id"
+            },
+            {
+              "name": "motif"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "d12529c0-6e8f-4119-bd74-f4bae3306ab5",
+      "name": "Appel depuis l agent"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into escalations (ticket_id, motif)\nvalues ($1::bigint, $2::text)\nreturning id as escalade_id, ticket_id, motif, statut;",
+        "options": {
+          "queryReplacement": "={{ [$json.ticket_id, $json.motif] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        220,
+        0
+      ],
+      "id": "ea0468fa-eec5-4ba6-b01d-6c9984afa3e8",
+      "name": "Insérer l escalade",
+      "credentials": {
+        "postgres": {
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Appel depuis l agent": {
+      "main": [
+        [
+          {
+            "node": "Insérer l escalade",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {}
+}
