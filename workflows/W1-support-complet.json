@@ -1,0 +1,607 @@
+{
+  "name": "W1 — Support complet : réception, agent, validation, envoi",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2.2,
+      "position": [
+        -640,
+        -32
+      ],
+      "id": "9f4c2d04-5f35-42a5-a2f2-b8a166bb5b54",
+      "name": "Email Trigger (IMAP)",
+      "credentials": {
+        "imap": {
+          "name": "IMAP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const empreinte = (s) => {\n  let h1 = 0x811c9dc5, h2 = 0x01000193;\n  for (let i = 0; i < s.length; i++) {\n    const c = s.charCodeAt(i);\n    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;\n    h2 = Math.imul(h2 ^ c, 0x85ebca6b) >>> 0;\n  }\n  return h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0');\n};\n\nconst trouverId = (m) =>\n  m.messageId ??\n  m.messageID ??\n  m.metadata?.['message-id'] ??\n  m.headers?.['message-id'] ??\n  null;\n\nconst out = [];\n\nfor (const item of $input.all()) {\n  const m = item.json;\n\n  const brut = m.textPlain ?? m.text ?? m.textHtml ?? '';\n  const texte = brut\n    .split(/\\r?\\n(?:>|Le .* a écrit\\s*:|On .* wrote:|-{2,}\\s*Forwarded)/)[0]\n    .replace(/[ \\t]*\\n[ \\t]*/g, '\\n')\n    .replace(/\\n{3,}/g, '\\n\\n')\n    .trim();\n\n  const from = m.from;\n  const expediteur = (\n    typeof from === 'string'\n      ? (from.match(/<(.+?)>/)?.[1] ?? from)\n      : (from?.value?.[0]?.address ?? 'inconnu@exemple.com')\n  ).trim().toLowerCase();\n\n  const sujet = (m.subject ?? '(sans objet)').trim();\n\n  const provider_id =\n    trouverId(m) ??\n    'h:' + empreinte(expediteur + '|' + sujet + '|' + (m.date ?? '') + '|' + texte);\n\n  const refs = [\n    m.metadata?.['references'] ?? '',\n    m.metadata?.['in-reply-to'] ?? '',\n  ].join(' ').match(/<[^>]+>/g) ?? [];\n\n  out.push({ json: { canal: 'email', provider_id, expediteur, sujet, texte, refs } });\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -432,
+        -32
+      ],
+      "id": "1fc9fbdd-51ba-4b95-88bc-8723f7fddc55",
+      "name": "Normaliser"
+    },
+    {
+      "parameters": {
+        "jsCode": "const regles = [\n  { categorie: 'authentification', priorite: 'haute',\n    mots: /mot de passe|connexion|me connecter|identifiant|compte bloqu|acces|accès|login|double authentification|code de verification|code de vérification/i },\n  { categorie: 'facturation', priorite: 'haute',\n    mots: /factur|preleve|prélèv|rembours|paiement|payer|debite|débité|abonnement|virement/i },\n  { categorie: 'panne', priorite: 'haute',\n    mots: /panne|erreur|bug|ne fonctionne plus|ne marche plus|tres lent|très lent|indisponible|plantage|charge pas|timeout/i },\n  { categorie: 'commercial', priorite: 'basse',\n    mots: /offre|devis|tarif|prix|commercial|partenariat|association|remise|essai gratuit/i },\n  { categorie: 'information', priorite: 'normale',\n    mots: /comment|pouvez-vous|je voudrais savoir|question|renseign|est-il possible/i },\n];\n\nconst urgence = /urgent|immediat|immédiat|au plus vite|bloque|bloqué|critique|avant vendredi|avant demain|des que possible|dès que possible/i;\n\nconst compter = (re, t) => (t.match(new RegExp(re.source, 'gi')) || []).length;\n\nconst out = [];\n\nfor (const item of $input.all()) {\n  const d = item.json;\n  const cible = ((d.sujet || '') + ' ' + (d.texte || '')).toLowerCase();\n\n  const langue = /[؀-ۿ]/.test(cible) ? 'ar' : 'fr';\n\n  const scores = regles\n    .map(r => ({ categorie: r.categorie, priorite: r.priorite, n: compter(r.mots, cible) }))\n    .sort((a, b) => b.n - a.n);\n\n  const premier = scores[0] || { n: 0 };\n  const second = scores[1] || { n: 0 };\n\n  let categorie = 'autre';\n  let priorite = 'normale';\n  let confiance = 0;\n\n  if (premier.n > 0) {\n    categorie = premier.categorie;\n    priorite = premier.priorite;\n    confiance = Math.min(0.95, 0.45 + 0.15 * (premier.n - second.n) + 0.05 * premier.n);\n  }\n\n  if (urgence.test(cible) && priorite !== 'haute') priorite = 'haute';\n\n  if (langue !== 'fr') { categorie = 'autre'; confiance = 0; }\n\n  const revue = confiance < 0.6 || langue !== 'fr';\n\n  out.push({ json: Object.assign({}, d, {\n    categorie: categorie,\n    priorite: priorite,\n    confiance: Number(confiance.toFixed(3)),\n    langue: langue,\n    revue: revue,\n  }) });\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        -32
+      ],
+      "id": "3c291fd7-a8e9-4898-b1ca-3af40a1e4b5e",
+      "name": "Classer"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with entrant as (\n  select $1::text    as provider_id,\n         $2::text    as email,\n         $3::text    as sujet,\n         $4::text    as texte,\n         $5::text[]  as refs,\n         $6::text    as categorie,\n         $7::text    as priorite,\n         $8::numeric as confiance\n),\nnouveau as (\n  select e.* from entrant e\n  where not exists (select 1 from messages m where m.provider_id = e.provider_id)\n),\nparent as (\n  select m.ticket_id\n  from messages m, nouveau n\n  where m.provider_id = any (n.refs)\n  order by m.id desc\n  limit 1\n),\ncust as (\n  insert into customers (email)\n  select n.email from nouveau n\n  on conflict (org_id, email) do update set email = excluded.email\n  returning id\n),\ntick as (\n  insert into tickets (customer_id, sujet, categorie, priorite, confiance)\n  select c.id, n.sujet, n.categorie, n.priorite, n.confiance\n  from cust c, nouveau n\n  where not exists (select 1 from parent)\n  returning id\n),\ncible as (\n  select ticket_id as id from parent\n  union all\n  select id from tick\n)\ninsert into messages (ticket_id, provider_id, sens, expediteur, texte)\nselect cible.id, n.provider_id, 'entrant', n.email, n.texte\nfrom cible, nouveau n\nreturning id as message_id, ticket_id;",
+        "options": {
+          "queryReplacement": "={{ [$json.provider_id, $json.expediteur, $json.sujet, $json.texte, $json.refs, $json.categorie, $json.priorite, $json.confiance] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        -32,
+        -32
+      ],
+      "id": "42983c37-b390-487a-a033-af1bfa56dfa5",
+      "name": "Enregistrer le ticket",
+      "credentials": {
+        "postgres": {
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const out = [];\n\nfor (const item of $input.all()) {\n  const brut = String(item.json.output ?? item.json.text ?? '');\n  const ticket = $('Enregistrer le ticket').item.json;\n\n  let p = null;\n  const m = brut.match(/\\{[\\s\\S]*\\}/);\n  if (m) { try { p = JSON.parse(m[0]); } catch (e) { p = null; } }\n\n  const sources = p && Array.isArray(p.sources) ? p.sources.map(String) : [];\n  const chunk_ids = p && Array.isArray(p.chunk_ids)\n    ? p.chunk_ids.map(Number).filter(function (x) { return Number.isFinite(x); })\n    : [];\n\n  const etaye = !!(p && p.etaye === true && chunk_ids.length > 0);\n\n  let texte;\n  if (!etaye) {\n    texte = 'Information insuffisante : aucune fiche publiee ne couvre cette demande. A traiter par un agent.';\n  } else {\n    texte = String(p.texte || '').trim() + '\\n\\nSources : ' + sources.join(' | ');\n  }\n\n  out.push({ json: {\n    ticket_id: ticket.ticket_id,\n    texte: texte,\n    etaye: etaye,\n    chunk_ids: chunk_ids,\n    revue: !etaye,\n    agent_brut: brut.slice(0, 2000),\n  }});\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        -32
+      ],
+      "id": "3268d3c7-7778-4e21-975a-2306e23310d4",
+      "name": "Préparer le brouillon"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with valides as (\n  select t.chunk_id, t.ord\n  from unnest($3::bigint[]) with ordinality as t(chunk_id, ord)\n  join knowledge_chunks k on k.id = t.chunk_id\n),\nd as (\n  insert into drafts (ticket_id, texte, etaye, modele)\n  values ($1::bigint, $2::text, (select count(*) > 0 from valides), 'agent-ollama-v1')\n  returning id, etaye\n),\nc as (\n  insert into citations (draft_id, chunk_id, rang)\n  select d.id, v.chunk_id, v.ord from d, valides v\n  returning draft_id\n)\nselect d.id as draft_id, d.etaye, (select count(*) from valides) as nb_citations\nfrom d;",
+        "options": {
+          "queryReplacement": "={{ [$json.ticket_id, $json.texte, $json.chunk_ids] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        704,
+        -32
+      ],
+      "id": "e3c242d7-a806-4003-abd6-8323bc821a9f",
+      "name": "Enregistrer le brouillon",
+      "credentials": {
+        "postgres": {
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Ticket {{ $json.ticket_id }} - categorie {{ $('Classer').item.json.categorie }}, priorite {{ $('Classer').item.json.priorite }}.\nClient : {{ $('Classer').item.json.expediteur }}\nSujet : {{ $('Classer').item.json.sujet }}\n\nMessage du client :\n{{ $('Classer').item.json.texte }}",
+        "options": {
+          "systemMessage": "Tu prepares un BROUILLON de reponse pour le support technique. Un agent humain le validera. Tu n'envoies jamais rien toi-meme.\n\nOutils disponibles :\n- rechercher_documentation(requete) : cherche dans les fiches PUBLIEES de l'entreprise. Retourne chunk_id, titre, version, texte, score.\n- historique_client(email) : les 5 derniers tickets de ce client.\n- creer_escalade(ticket_id, motif) : transfere la demande a un humain.\n\nRegles absolues :\n1. Tu ne rediges QUE a partir des passages retournes par rechercher_documentation. Jamais a partir de tes connaissances generales.\n2. Si la premiere recherche ne donne rien d'utile, reformule avec d'autres mots et cherche une seconde fois. Trois recherches au maximum.\n3. Si aucun passage ne repond apres ces recherches, appelle creer_escalade puis reponds avec etaye = false.\n4. Remboursement, annulation, geste commercial, donnees personnelles, menace juridique : tu n'ecris aucune reponse, tu appelles creer_escalade.\n5. Chaque affirmation vient d'un passage. Tu listes les chunk_id que tu as utilises.\n\nTu reponds UNIQUEMENT par un objet JSON, sans aucun texte autour :\n{\"texte\": \"reponse en francais, polie et concise\", \"etaye\": true, \"sources\": [\"Titre de la fiche (v1)\"], \"chunk_ids\": [12, 13], \"escalade\": false, \"motif\": \"\"}",
+          "maxIterations": 8
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        176,
+        -32
+      ],
+      "id": "5ee740e8-c177-4e51-b410-10e14771d292",
+      "name": "Agent de support"
+    },
+    {
+      "parameters": {
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        96,
+        208
+      ],
+      "id": "3e64caef-db33-4bd8-957c-dc9feeb92d2d",
+      "name": "Ollama Chat Model",
+      "credentials": {
+        "ollamaApi": {
+          "name": "Ollama local"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "description": "Cherche dans les fiches publiees de l'entreprise. Donne une requete en francais avec les mots-cles du probleme.",
+        "workflowId": {
+          "__rl": true,
+          "value": "TlqJpnMn4gV8ui2D",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/TlqJpnMn4gV8ui2D",
+          "cachedResultName": "T1 — Rechercher dans la documentation"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "requete": "={{ $fromAI('requete', 'les mots-cles du probleme, reformules en francais', 'string') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "requete",
+              "displayName": "requete",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        256,
+        208
+      ],
+      "id": "df7f8e85-da75-4681-897c-d7fa95103d1d",
+      "name": "rechercher_documentation"
+    },
+    {
+      "parameters": {
+        "description": "Renvoie les 5 derniers tickets de ce client. Utile pour savoir si le probleme est recurrent.",
+        "workflowId": {
+          "__rl": true,
+          "value": "Gspr9BDAzc5xDeon",
+          "mode": "list",
+          "cachedResultName": "T2 — Historique du client"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "email": "={{ $fromAI('email', 'adresse email du client', 'string') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "email",
+              "displayName": "email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        416,
+        208
+      ],
+      "id": "2829105c-8f92-49e0-bdbb-bfd0b15737be",
+      "name": "historique_client"
+    },
+    {
+      "parameters": {
+        "description": "Transfere la demande a un humain. A utiliser si aucune fiche ne repond, ou pour remboursement, annulation, geste commercial, donnees personnelles, juridique.",
+        "workflowId": {
+          "__rl": true,
+          "value": "3niC0GyDHOOkImT4",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/3niC0GyDHOOkImT4",
+          "cachedResultName": "T3 — Créer une escalade"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "ticket_id": "={{ $fromAI('ticket_id', 'identifiant numerique du ticket', 'string') }}",
+            "motif": "={{ $fromAI('motif', 'la raison de cette escalade, en une phrase', 'string') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "ticket_id",
+              "displayName": "ticket_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "motif",
+              "displayName": "motif",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        560,
+        208
+      ],
+      "id": "f709c89e-1369-4357-bf33-088a8a6c45b7",
+      "name": "creer_escalade"
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "fromEmail": "support@exemple.com",
+        "toEmail": "agent@exemple.com",
+        "subject": "=[SupportMind] Valider la réponse — ticket {{ $('Préparer le brouillon').item.json.ticket_id }}",
+        "message": "=Ticket {{ $('Préparer le brouillon').item.json.ticket_id }} — {{ $('Classer').item.json.categorie }} / priorité {{ $('Classer').item.json.priorite }}\nClient : {{ $('Classer').item.json.expediteur }}\nSujet : {{ $('Classer').item.json.sujet }}\nRéponse étayée par des sources : {{ $('Préparer le brouillon').item.json.etaye ? 'oui' : 'NON' }}\n\n--- MESSAGE DU CLIENT ---\n{{ $('Classer').item.json.texte }}\n\n--- BROUILLON PROPOSÉ ---\n{{ $('Préparer le brouillon').item.json.texte }}\n\nApprouvez pour envoyer cette réponse au client. Refusez pour créer une escalade.",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double"
+          }
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        896,
+        -32
+      ],
+      "id": "c76973ac-6708-4c3c-85ff-d9ebb9d70e26",
+      "name": "Demander validation",
+      "webhookId": "cf861e4c-4d54-4457-b7d0-63d0b377c2a9",
+      "credentials": {
+        "smtp": {
+          "name": "SMTP Gmail"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "702579b4-877e-4a56-9376-ebd7a18cd6b6",
+              "leftValue": "={{ $json.data.approved }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        1088,
+        -32
+      ],
+      "id": "ff292a52-c01c-4d20-9a42-c6ac981bd1cf",
+      "name": "Réponse approuvée ?"
+    },
+    {
+      "parameters": {
+        "fromEmail": "support@exemple.com",
+        "toEmail": "={{ $('Classer').item.json.expediteur }}",
+        "subject": "=Re: {{ $('Classer').item.json.sujet }}",
+        "emailFormat": "text",
+        "text": "={{ $('Préparer le brouillon').item.json.texte }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1328,
+        -160
+      ],
+      "id": "1dd497a5-ab7c-4f02-b486-a6e3ba2f4c4f",
+      "name": "Répondre au client",
+      "webhookId": "795f8830-9cc5-4133-9209-5ca4942fec91",
+      "credentials": {
+        "smtp": {
+          "name": "SMTP Gmail"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "update drafts set statut = 'envoye' where id = $1::bigint returning id as draft_id, statut;",
+        "options": {
+          "queryReplacement": "={{ [$('Enregistrer le brouillon').item.json.draft_id] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        1536,
+        -176
+      ],
+      "id": "150c4322-5878-4235-98fb-0773d93fc502",
+      "name": "Marquer envoyé",
+      "credentials": {
+        "postgres": {
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with e as (\n  insert into escalations (ticket_id, motif)\n  values ($1::bigint, $2::text)\n  returning id as escalade_id, ticket_id\n),\nd as (\n  update drafts set statut = 'rejete' where id = $3::bigint returning id as draft_id\n)\nselect e.escalade_id, e.ticket_id, d.draft_id from e, d;",
+        "options": {
+          "queryReplacement": "={{ [$('Préparer le brouillon').item.json.ticket_id, 'Brouillon refuse par l agent support', $('Enregistrer le brouillon').item.json.draft_id] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        1328,
+        96
+      ],
+      "id": "4f0c6d28-470e-4b97-990c-1149a587ddcd",
+      "name": "Créer l'escalade",
+      "credentials": {
+        "postgres": {
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "support@exemple.com",
+        "toEmail": "agent@exemple.com",
+        "subject": "=[SupportMind] ESCALADE — ticket {{ $json.ticket_id }} ({{ $('Classer').item.json.categorie }})",
+        "emailFormat": "text",
+        "text": "=Escalade {{ $json.escalade_id }} sur le ticket {{ $json.ticket_id }}.\nLe brouillon automatique a été refusé par l'agent support.\n\nClient : {{ $('Classer').item.json.expediteur }}\nSujet : {{ $('Classer').item.json.sujet }}\nPriorité : {{ $('Classer').item.json.priorite }}\n\n--- MESSAGE DU CLIENT ---\n{{ $('Classer').item.json.texte }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1568,
+        128
+      ],
+      "id": "20064173-e274-4691-ba1a-d617618e5284",
+      "name": "Prévenir le technicien",
+      "webhookId": "d3217c45-edd1-4c97-bbde-10fa7ed6b4c5",
+      "credentials": {
+        "smtp": {
+          "name": "SMTP Gmail"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Email Trigger (IMAP)": {
+      "main": [
+        [
+          {
+            "node": "Normaliser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normaliser": {
+      "main": [
+        [
+          {
+            "node": "Classer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classer": {
+      "main": [
+        [
+          {
+            "node": "Enregistrer le ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enregistrer le ticket": {
+      "main": [
+        [
+          {
+            "node": "Agent de support",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer le brouillon": {
+      "main": [
+        [
+          {
+            "node": "Enregistrer le brouillon",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent de support": {
+      "main": [
+        [
+          {
+            "node": "Préparer le brouillon",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Agent de support",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "rechercher_documentation": {
+      "ai_tool": [
+        [
+          {
+            "node": "Agent de support",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "historique_client": {
+      "ai_tool": [
+        [
+          {
+            "node": "Agent de support",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "creer_escalade": {
+      "ai_tool": [
+        [
+          {
+            "node": "Agent de support",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enregistrer le brouillon": {
+      "main": [
+        [
+          {
+            "node": "Demander validation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Demander validation": {
+      "main": [
+        [
+          {
+            "node": "Réponse approuvée ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Réponse approuvée ?": {
+      "main": [
+        [
+          {
+            "node": "Répondre au client",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Créer l'escalade",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Répondre au client": {
+      "main": [
+        [
+          {
+            "node": "Marquer envoyé",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Créer l'escalade": {
+      "main": [
+        [
+          {
+            "node": "Prévenir le technicien",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}
